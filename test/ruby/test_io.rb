@@ -1238,6 +1238,37 @@ class TestIO < Test::Unit::TestCase
     end
   end
 
+  def test_O_CLOEXEC
+    if !defined? File::CLOEXEC
+      return
+    end
+
+    mkcdtmpdir do
+      normal_file = Tempfile.new("normal_file");
+      assert_equal(false, normal_file.close_on_exec?)
+
+      cloexec_file = Tempfile.new("cloexec_file", :mode => File::CLOEXEC);
+      assert_equal(true, cloexec_file.close_on_exec?)
+
+      argfile = Tempfile.new("argfile");
+
+      argfile.puts normal_file.fileno
+      argfile.puts cloexec_file.fileno
+      argfile.flush
+
+      ruby('-e', <<-'End', argfile.path) { |f|
+        begin
+	  puts IO.for_fd(ARGF.gets.to_i).fileno
+	  puts IO.for_fd(ARGF.gets.to_i).fileno
+        rescue
+          puts "nofile"
+        end
+      End
+      assert_equal("#{normal_file.fileno}\nnofile\n", f.read)
+    }
+    end
+  end
+
   def test_close_security_error
     with_pipe do |r, w|
       assert_raise(SecurityError) do
@@ -1808,5 +1839,45 @@ End
       Process.kill :TERM, pid
       Process.waitpid2(pid)
     end
+  end
+
+  def test_cross_thread_close_fd
+    skip "cross thread close causes hung-up if pipe." if /mswin|bccwin|mingw/ =~ RUBY_PLATFORM
+    with_pipe do |r,w|
+      read_thread = Thread.new do
+        begin
+          r.read(1)
+        rescue => e
+          e
+        end
+      end
+
+      sleep(0.1) until read_thread.stop?
+      r.close
+      read_thread.join
+      assert_kind_of(IOError, read_thread.value)
+    end
+  end
+
+  def test_cross_thread_close_stdio
+    with_pipe do |r,w|
+      pid = fork do
+        $stdin.reopen(r)
+        r.close
+        read_thread = Thread.new do
+          begin
+            $stdin.read(1)
+          rescue => e
+            e
+          end
+        end
+        sleep(0.1) until read_thread.stop?
+        $stdin.close
+        read_thread.join
+        exit(IOError === read_thread.value)
+      end
+      assert Process.waitpid2(pid)[1].success?
+    end
+    rescue NotImplementedError
   end
 end
